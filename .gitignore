@@ -1,0 +1,15 @@
+datasets
+indexed
+merged
+*.pyc
+output
+pics
+runs
+*.pt
+sam_old.ipynb
+test.*
+clipboard.*
+processed_image.*
+*.zip
+*.7z
+*.yaml
