@@ -34,21 +34,11 @@ sys.path.append("..")
 import torch
 
 from typing import overload
+from seg_lib import label_names, seg_cv2_yolo
+from polygon_lib import SelectedArea, qpixmap_to_cvimage
 
-label_names = {0:"line",
-               1:"bar",}
+white_thres = 230
 
-white_thres = 220
-
-def qpixmap_to_cvimage(qpixmap:QPixmap):
-    if qpixmap.isNull():
-        return None
-    image=qpixmap.copy().toImage()
-    width,heith=image.width(),image.height()
-    buffer=image.bits()
-    img=np.frombuffer(buffer,dtype=np.uint8).reshape((heith,width,4))
-    img=cv2.cvtColor(img,cv2.COLOR_RGBA2RGB)
-    return img
 
 class MaskArea(QScrollArea):
     @property
@@ -137,7 +127,7 @@ class MaskAreaContent(QLabel):
         (
             event_loop
                 .run_in_executor(None, lambda: self.auto_segment())
-                .add_done_callback(lambda future: setattr(self, "autocontours", future.result()))
+                .add_done_callback(lambda future: self.update_pixmap())
         )
 
     def paintEvent(self, event):
@@ -456,142 +446,17 @@ class MaskAreaContent(QLabel):
     def auto_segment(self):
         image=qpixmap_to_cvimage(self.original_pixmap)
         if image is None:
-            return SelectedArea(label= self.current_label)
-
-        def segment_by_color(image, lower_color, upper_color):
-            # 将图像转换为HSV颜色空间
-            hsv_image = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-
-            # 根据颜色范围创建掩码
-            mask = cv2.inRange(hsv_image, lower_color, upper_color)
-
-            # 对掩码进行形态学操作（可选）
-            mask = cv2.erode(mask, None, iterations=2)
-            mask = cv2.dilate(mask, None, iterations=2)
-
-            return mask
-
-
-        # 定义多个颜色范围（例如，红色和蓝色）
-        gap = 20
-        color_ranges = [
-            (np.array([hue * gap, 100, 100]), np.array([(hue + 1) * gap, 255, 255])) for hue in range(int(360 / gap / 2))
-        ]
-
-        # black
-        color_ranges.append((np.array([0, 0, 0]), np.array([360, 255, 30])))
-
-        # 初始化总掩码
-        total_mask = np.zeros(image.shape[:2], dtype="uint8")
-
-        # 对每个颜色范围进行分割
-        for lower_color, upper_color in color_ranges:
-            mask = segment_by_color(image, lower_color, upper_color)
-            total_mask = cv2.bitwise_or(total_mask, mask)
-
-        # 在总掩码上查找轮廓
-        contours_, hierarchy = cv2.findContours(total_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        contours = [c for c in contours_ if cv2.contourArea(c) > 25]
-
-        #contour = contours_[0][np.argmax([len(c) for c in contours_[0]])]
-        #print("contour.shape",contour.shape)
-        # polygon = QPolygonF([QPoint(x, y) for x, y in contour[:, 0]])
-        # return polygon
-        area = SelectedArea(label= self.current_label)
-        for contour in contours:
-            polygon = QPolygonF([QPoint(x, y) for x, y in contour[:, 0]])
-            area.add_polygon(polygon)
-
-        print("auto_segment", area.area())
-
-        return area
+            return
+        segs = seg_cv2_yolo(image)
+        for label, area in segs.items():
+            print(label, area.area())
+            if not label in self.label_area_map:
+                self.label_area_map[label] = SelectedArea(label=label)
+            self.label_area_map[label].merge(area)
+            
+        self.label_area_map[self.current_label] = self.shrink_area_to_area(self.selected_area(), self.cancel_area)
+                
 
     async def boot(self):
         pass
     
-class SelectedArea:
-    polygons: list[QPolygonF]
-    label: int = 0
-    def __init__(self, polygons:list[QPolygonF]=None, rectangles:list[QRectF|QRect]=None, label=0):
-        self.label = label
-        if polygons is None:
-            polygons = []
-        self.polygons = polygons
-        if rectangles is not None:
-            self.polygons.extend([QPolygonF(rect) for rect in rectangles])
-
-    def __iter__(self):
-        return iter(self.polygons)
-    
-    def __contains__(self,point:QPoint):
-        return self.containsPoint(point)
-        
-    def add_polygon(self,polygon:QPolygonF):
-        self.polygons.append(polygon)
-
-    def add_rect(self,rect:QRect|QRectF):
-        self.polygons.append(QPolygonF(rect))
-
-    def remove_polygon(self,polygon:QPolygonF):
-        self.polygons.remove(polygon)
-
-    def area(self):
-        def polygon_area(polygon:QPolygonF):
-            area = 0
-            for i in range(len(polygon)):
-                x1, y1 = polygon[i].x(), polygon[i].y()
-                x2, y2 = polygon[(i + 1) % len(polygon)].x(), polygon[(i + 1) % len(polygon)].y()
-                area += (x1 * y2 - x2 * y1)
-            return abs(area) / 2
-        area = 0
-        for polygon in self.polygons:
-            area += polygon_area(polygon)
-        return area
-    
-    def containsPoint(self,point:QPoint):
-        for polygon in self.polygons:
-            if polygon.containsPoint(point, Qt.FillRule.WindingFill):
-                return True
-        return False
-    
-    def draw(self,painter:QPainter):
-        for polygon in self.polygons:
-            painter.drawPolygon(polygon)
-
-    def addToFillPath(self,fill_path:QPainterPath):
-        for polygon in self.polygons:
-            fill_path.addPolygon(polygon)
-
-    def translated(self,dx:int,dy:int):
-        return SelectedArea([polygon.translated(dx,dy) for polygon in self.polygons],label=self.label)
-    
-    def to_yolo(self,image_width:int,image_height:int):
-        """Convert to YOLO format
-        The dataset label format used for training YOLO segmentation models is as follows:
-
-        One text file per image: Each image in the dataset has a corresponding text file with the same
-        name as the image file and the ".txt" extension.
-        One row per object: Each row in the text file corresponds to one object instance in the image.
-        Object information per row: Each row contains the following information about the object instance:
-        Object class index: An integer representing the class of the object (e.g., 0 for person, 1 for car, etc.).
-        Object bounding coordinates: The bounding coordinates around the mask area, normalized to be between 0 and 1.
-        The format for a single row in the segmentation dataset file is as follows:
-        <class-index> <x1> <y1> <x2> <y2> ... <xn> <yn>
-        In this format, <class-index> is the index of the class for the object, and <x1> <y1> <x2> <y2> ... <xn> <yn> are 
-        the bounding coordinates of the object's segmentation mask. The coordinates are separated by spaces."""
-        yolos = []
-        for polygon in self.polygons:
-            yolo = [str(self.label)]
-            for point in polygon:
-                x = point.x() / image_width
-                y = point.y() / image_height
-                yolo.append(f"{x:.5f}")
-                yolo.append(f"{y:.5f}")
-            yolos.append(" ".join(yolo))
-        return yolos
-    
-    def to_yolo_txt(self,image_width:int,image_height:int,filename:str):
-        with open(filename,"w") as f:
-            yolos = self.to_yolo(image_width,image_height)
-            f.write("\n".join(yolos))

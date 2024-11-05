@@ -30,7 +30,8 @@ import asyncio
 
 from PIL import Image
 
-from maskarea import MaskArea, label_names
+from maskarea import MaskArea
+from seg_lib import label_names
 
 indexed_folder = "indexed"
 os.makedirs(indexed_folder,exist_ok=True)

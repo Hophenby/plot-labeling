@@ -13,3 +13,4 @@ processed_image.*
 *.zip
 *.7z
 *.yaml
+auto_generated_images
